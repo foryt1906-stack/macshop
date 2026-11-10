@@ -1,0 +1,105 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install pywebview pyinstaller
+      - name: Build Windows app
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed --name MoiaKramnytsia
+          --add-data "index.html;." --collect-all webview
+          --hidden-import webview.platforms.edgechromium app.py
+      - name: Prepare release asset
+        run: Copy-Item dist\MoiaKramnytsia.exe dist\MoiaKramnytsia-windows-x64.exe
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/MoiaKramnytsia-windows-x64.exe
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: apple-silicon
+            asset_name: MoiaKramnytsia-macos-apple-silicon.dmg
+          - runner: macos-15-intel
+            architecture: intel
+            asset_name: MoiaKramnytsia-macos-intel.dmg
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install pywebview pyinstaller
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          actual="$(uname -m)"
+          if [[ "$EXPECTED_ARCHITECTURE" == "apple-silicon" && "$actual" != "arm64" ]]; then
+            echo "Expected Apple Silicon (arm64), got $actual"
+            exit 1
+          fi
+          if [[ "$EXPECTED_ARCHITECTURE" == "intel" && "$actual" != "x86_64" ]]; then
+            echo "Expected Intel (x86_64), got $actual"
+            exit 1
+          fi
+      - name: Build macOS app
+        run: >-
+          pyinstaller --noconfirm --clean --windowed --name MoiaKramnytsia
+          --add-data "index.html:." --collect-all webview
+          --hidden-import webview.platforms.cocoa app.py
+      - name: Package disk image
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: |
+          hdiutil create \
+            -volname "MoiaKramnytsia" \
+            -srcfolder "dist/MoiaKramnytsia.app" \
+            -ov \
+            -format UDZO \
+            "dist/${ASSET_NAME}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.architecture }}
+          path: dist/${{ matrix.asset_name }}
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          shasum -a 256 *.exe *.dmg > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
